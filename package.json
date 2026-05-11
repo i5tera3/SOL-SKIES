@@ -6,9 +6,9 @@
     "dev": "vite",
     "server": "node server/index.mjs",
     "dev:all": "concurrently \"npm run server\" \"npm run dev\"",
-    "build": "npx --no-install vite build",
+    "build": "node ./node_modules/vite/bin/vite.js build",
     "start": "node server/index.mjs",
-    "deploy:build": "npx --no-install vite build"
+    "deploy:build": "node ./node_modules/vite/bin/vite.js build"
   },
   "dependencies": {
     "@solana/wallet-adapter-base": "^0.9.23",
@@ -29,12 +29,11 @@
     "react-hot-toast": "^2.4.1",
     "react-router-dom": "^7.1.5",
     "tweetnacl": "^1.0.3",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
+    "zod": "^3.23.8",
     "@vitejs/plugin-react": "^4.3.4",
     "vite": "^6.1.0"
   },
+  "devDependencies": {},
   "overrides": {
     "rpc-websockets": {
       "uuid": "^9.0.0"

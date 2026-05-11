@@ -1,3 +1,4 @@
+import { API_BASE } from '../lib/api';
 import { useState, useEffect } from 'react';
 
 const ICONS = {
@@ -31,7 +32,7 @@ export default function WeatherWidget({ lat, lng, startDate, endDate }) {
     if (!lat || !lng) return;
     setLoading(true);
     setError(null);
-    fetch(`http://localhost:3001/api/weather?lat=${lat}&lng=${lng}`)
+    fetch(`${API_BASE}/api/weather?lat=${lat}&lng=${lng}`)
       .then(r => r.json())
       .then(data => {
         setForecast(data.daily || []);

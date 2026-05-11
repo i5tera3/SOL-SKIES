@@ -3,6 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useSession } from '../Context/sessionContext';
 import WeatherWidget from '../components/WeatherWidget';
 import MapView from '../components/MapView';
+import MissionStatePill from '../components/MissionStatePill';
+import RiskBadge from '../components/RiskBadge';
+import EligibilityBadge from '../components/EligibilityBadge';
+import SlotGrid from '../components/SlotGrid';
+import AuditTimeline from '../components/AuditTimeline';
+import AirspaceBadge from '../components/AirspaceBadge';
+import { API_BASE } from '../lib/api';
 
 export default function MissionDetails() {
   const { id } = useParams();
@@ -23,7 +30,7 @@ export default function MissionDetails() {
     }
 
     // Fetch mission
-    fetch(`http://localhost:3001/api/missions/${id}`)
+    fetch(`${API_BASE}/api/missions/${id}`)
       .then(r => r.json())
       .then(data => {
         if (data.error) {
@@ -31,7 +38,7 @@ export default function MissionDetails() {
         } else {
           setMission(data);
           // Fetch enterprise profile
-          return fetch(`http://localhost:3001/api/enterprises/${data.enterprise_id}`);
+          return fetch(`${API_BASE}/api/enterprises/${data.enterprise_id}`);
         }
       })
       .then(r => r?.json())
@@ -50,7 +57,7 @@ export default function MissionDetails() {
   // Check if already applied
   useEffect(() => {
     if (!user || user.role !== 'operator' || !id) return;
-    fetch(`http://localhost:3001/api/operators/${user.id}/applications`)
+    fetch(`${API_BASE}/api/operators/${user.id}/applications`)
       .then(r => r.json())
       .then(data => {
         if (Array.isArray(data)) {
@@ -68,7 +75,7 @@ export default function MissionDetails() {
 
     setApplying(true);
     try {
-      const response = await fetch('http://localhost:3001/api/applications', {
+      const response = await fetch(`${API_BASE}/api/applications`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -224,9 +231,13 @@ export default function MissionDetails() {
                   <p style={{ color: '#888', fontSize: '13px', marginBottom: '6px' }}>
                     Status
                   </p>
-                  <p style={{ fontSize: '18px', fontWeight: '600', textTransform: 'capitalize' }}>
-                    {mission.status || 'open'}
-                  </p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+                    <MissionStatePill state={mission.status || 'open'} />
+                    <RiskBadge missionId={mission.id} compact />
+                    {user?.role === 'operator' && (
+                      <EligibilityBadge missionId={mission.id} compact />
+                    )}
+                  </div>
                 </div>
                 {mission.start_date && mission.end_date && (
                   <>
@@ -251,15 +262,43 @@ export default function MissionDetails() {
               </div>
             </div>
 
+            {/* Multi-operator slot grid (only renders when mission has slots) */}
+            <SlotGrid missionId={mission.id} currentUser={user} />
+
+            {/* Airspace authorization (LAANC mock) */}
+            {mission.latitude && mission.longitude && (
+              <div style={{ marginBottom: '20px', marginTop: '20px' }}>
+                <p style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px', color: '#fff' }}>
+                  🛡 Airspace authorization
+                </p>
+                <AirspaceBadge lat={mission.latitude} lng={mission.longitude} />
+              </div>
+            )}
+
             {/* Map */}
             {mission.latitude && mission.longitude && (
-              <div style={{ marginBottom: '20px' }}>
+              <div style={{ marginBottom: '20px', marginTop: '20px' }}>
                 <p style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px', color: '#fff' }}>
                   📍 Location
                 </p>
                 <MapView lat={mission.latitude} lng={mission.longitude} height={300} />
               </div>
             )}
+
+            {/* Audit timeline */}
+            <div style={{ marginTop: '20px' }}>
+              <p style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px', color: '#fff' }}>
+                📜 Activity timeline
+              </p>
+              <div style={{
+                background: '#111',
+                border: '1px solid #222',
+                borderRadius: '16px',
+                padding: '20px',
+              }}>
+                <AuditTimeline entityType="mission" entityId={mission.id} />
+              </div>
+            </div>
 
             {/* Weather */}
             {mission.latitude && mission.longitude && (

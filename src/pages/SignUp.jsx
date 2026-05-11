@@ -3,10 +3,9 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import bs58 from 'bs58';
 import logo from '../assets/AdobSOL.png';
-import { SigninMessage } from '../utils/SigninMessage';
 import { useSession } from '../Context/sessionContext';
+import { API_BASE, getSignupProof } from '../lib/api';
 
 function SignUp() {
   const navigate = useNavigate();
@@ -173,7 +172,7 @@ function SignUp() {
     const checkWallet = async () => {
       if (connected && publicKey) {
         try {
-          const response = await fetch(`http://localhost:3001/api/check/wallet?wallet=${publicKey.toBase58()}`);
+          const response = await fetch(`${API_BASE}/api/check/wallet?wallet=${publicKey.toBase58()}`);
           const data = await response.json();
           setAvailability(prev => ({
             ...prev,
@@ -197,7 +196,7 @@ function SignUp() {
       if (role === 'operator' && formData.username && formData.username.length > 2) {
         setCheckingAvailability(true);
         try {
-          const response = await fetch(`http://localhost:3001/api/check/username?username=${formData.username}`);
+          const response = await fetch(`${API_BASE}/api/check/username?username=${formData.username}`);
           const data = await response.json();
           setAvailability(prev => ({
             ...prev,
@@ -224,7 +223,7 @@ function SignUp() {
       if (role === 'enterprise' && formData.legalName && formData.legalName.length > 2) {
         setCheckingAvailability(true);
         try {
-          const response = await fetch(`http://localhost:3001/api/check/company?name=${encodeURIComponent(formData.legalName)}`);
+          const response = await fetch(`${API_BASE}/api/check/company?name=${encodeURIComponent(formData.legalName)}`);
           const data = await response.json();
           setAvailability(prev => ({
             ...prev,
@@ -449,43 +448,29 @@ function SignUp() {
     }
   };
 
+  // Returns { signature, nonce } from a server-issued challenge, or null on failure.
+  // Replay-resistant: nonce is single-use and 5-minute time-bound (server-side).
   const verifyWalletOwnership = async () => {
     if (!connected || !publicKey || !signMessage) {
       setVerificationError('Wallet not connected or does not support message signing');
-      return false;
+      return null;
     }
 
     if (availability.wallet.available === false) {
       setVerificationError('This wallet is already registered');
-      return false;
+      return null;
     }
 
     try {
       setIsVerifying(true);
       setVerificationError('');
-
-      const nonce = crypto.randomUUID();
-      const message = new SigninMessage({
-        domain: window.location.host,
-        publicKey: publicKey.toBase58(),
-        nonce: nonce,
-        statement: `Sign this message to verify ownership of your ${role} wallet for Sol Skies.`
-      });
-
-      const encodedMessage = new TextEncoder().encode(message.prepare());
-      const signature = await signMessage(encodedMessage);
-      const isValid = await message.validate(bs58.encode(signature));
-
-      if (!isValid) {
-        setVerificationError('Signature verification failed');
-        return false;
-      }
-
-      return true;
+      // Server picks the nonce + statement; we sign and return base58 signature.
+      const proof = await getSignupProof(publicKey.toBase58(), signMessage);
+      return proof; // { signature, nonce }
     } catch (error) {
       console.error('Verification error:', error);
       setVerificationError(error.message || 'Failed to verify wallet');
-      return false;
+      return null;
     } finally {
       setIsVerifying(false);
     }
@@ -497,7 +482,7 @@ function SignUp() {
     formData.append('type', type);
 
     try {
-      const response = await fetch('http://localhost:3001/api/upload', {
+      const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         body: formData
       });
@@ -511,38 +496,29 @@ function SignUp() {
     }
   };
 
-  // Updated to return user data for session
-  const submitOperatorToDatabase = async (walletAddress) => {
+  // Posts the operator profile + the signed challenge proof together.
+  // On success returns { user, token } from the server.
+  const submitOperatorToDatabase = async (walletAddress, proof) => {
     setIsSubmitting(true);
     setSubmitError('');
 
     try {
-      // Upload drone image if exists
       let droneImageUrl = '';
-      if (droneImage) {
-        droneImageUrl = await uploadFileToServer(droneImage, 'drone');
-      }
+      if (droneImage) droneImageUrl = await uploadFileToServer(droneImage, 'drone');
 
-      // Upload certification files
       const certFiles = [];
       for (const file of certificationFiles) {
         const url = await uploadFileToServer(file, 'certification');
-        if (url) {
-          certFiles.push({
-            name: file.name,
-            url: url,
-            type: file.type
-          });
-        }
+        if (url) certFiles.push({ name: file.name, url, type: file.type });
       }
 
-      const response = await fetch('http://localhost:3001/api/operators', {
+      const response = await fetch(`${API_BASE}/api/operators`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           wallet_address: walletAddress,
+          signature: proof.signature,
+          nonce: proof.nonce,
           full_name: formData.fullName,
           username: formData.username,
           region: formData.region,
@@ -555,7 +531,7 @@ function SignUp() {
           communication_protocol: formData.communicationProtocol,
           experience: formData.experience,
           certifications: formData.certifications,
-          certification_files: certFiles
+          certification_files: certFiles,
         }),
       });
 
@@ -565,16 +541,16 @@ function SignUp() {
       }
 
       const data = await response.json();
-
-      // Return user data for session
       return {
-        id: data.id,
-        fullName: formData.fullName,
-        username: formData.username,
-        walletAddress,
-        role: 'operator'
+        user: {
+          id: data.id,
+          fullName: formData.fullName,
+          username: formData.username,
+          walletAddress,
+          role: 'operator',
+        },
+        token: data.token,
       };
-
     } catch (error) {
       console.error('Database error:', error);
       setSubmitError(error.message);
@@ -584,25 +560,22 @@ function SignUp() {
     }
   };
 
-  // Updated to return user data for session
-  const submitEnterpriseToDatabase = async (walletAddress) => {
+  // Posts the enterprise profile + the signed challenge proof together.
+  const submitEnterpriseToDatabase = async (walletAddress, proof) => {
     setIsSubmitting(true);
     setSubmitError('');
 
     try {
-      // Upload business certificate if provided
       let businessCertUrl = null;
-      if (businessCertFile) {
-        businessCertUrl = await uploadFileToServer(businessCertFile, 'business_cert');
-      }
+      if (businessCertFile) businessCertUrl = await uploadFileToServer(businessCertFile, 'business_cert');
 
-      const response = await fetch('http://localhost:3001/api/enterprises', {
+      const response = await fetch(`${API_BASE}/api/enterprises`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           wallet_address: walletAddress,
+          signature: proof.signature,
+          nonce: proof.nonce,
           company_name: formData.legalName,
           business_type: formData.businessType,
           year_established: formData.yearEstablished ? parseInt(formData.yearEstablished) : null,
@@ -624,16 +597,16 @@ function SignUp() {
       }
 
       const data = await response.json();
-
-      // Return user data for session
       return {
-        id: data.id,
-        fullName: formData.fullName,
-        companyName: formData.legalName,
-        walletAddress,
-        role: 'enterprise'
+        user: {
+          id: data.id,
+          fullName: formData.fullName,
+          companyName: formData.legalName,
+          walletAddress,
+          role: 'enterprise',
+        },
+        token: data.token,
       };
-
     } catch (error) {
       console.error('Database error:', error);
       setSubmitError(error.message);
@@ -643,28 +616,19 @@ function SignUp() {
     }
   };
 
-  // Create session after successful signup
+  // 1. Sign the wallet challenge (proves wallet ownership).
+  // 2. POST profile + proof — server verifies, creates record, issues JWT.
+  // 3. Persist user + token via session context, then route to dashboard.
   const completeSignup = async () => {
-    const isValid = await verifyWalletOwnership();
-    if (!isValid) return;
+    const proof = await verifyWalletOwnership();
+    if (!proof) return;
 
-    let userData;
-    if (role === 'operator') {
-      userData = await submitOperatorToDatabase(publicKey.toBase58());
-    } else {
-      userData = await submitEnterpriseToDatabase(publicKey.toBase58());
-    }
+    const submitter = role === 'operator' ? submitOperatorToDatabase : submitEnterpriseToDatabase;
+    const result = await submitter(publicKey.toBase58(), proof);
+    if (!result) return;
 
-    if (userData) {
-      // FIX: call context login() so SessionContext React state updates immediately.
-      // Without this, SessionContext already ran checkSession() on mount (before this
-      // session existed) and its isAuthenticated=false state is stale — causing
-      // ProtectedRoute to block the dashboard and redirect to /login, which then
-      // re-opens the wallet popup. login() updates the in-memory state instantly.
-      login(userData, true); // true = rememberMe (30 days)
-
-      navigate(role === 'operator' ? '/operator/dashboard' : '/enterprise/dashboard');
-    }
+    login(result.user, result.token);
+    navigate(role === 'operator' ? '/operator/dashboard' : '/enterprise/dashboard');
   };
 
   // Complete styles

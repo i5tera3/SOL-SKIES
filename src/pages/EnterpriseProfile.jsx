@@ -1,9 +1,13 @@
+import { API_BASE } from '../lib/api';
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useSession } from '../Context/sessionContext';
+import BioEditor from '../components/BioEditor';
 
 export default function EnterpriseProfile() {
   const { companySlug } = useParams();
   const navigate = useNavigate();
+  const { user } = useSession();
   const [enterprise, setEnterprise] = useState(null);
   const [missions, setMissions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -17,7 +21,7 @@ export default function EnterpriseProfile() {
     }
 
     // Fetch enterprise profile
-    fetch(`http://localhost:3001/api/profiles/enterprise/name/${companySlug}`)
+    fetch(`${API_BASE}/api/profiles/enterprise/name/${companySlug}`)
       .then(r => r.json())
       .then(data => {
         if (data.error) {
@@ -25,7 +29,7 @@ export default function EnterpriseProfile() {
         } else {
           setEnterprise(data);
           // Fetch missions for this enterprise
-          return fetch(`http://localhost:3001/api/missions?enterprise_id=${data.id}&status=open`);
+          return fetch(`${API_BASE}/api/missions?enterprise_id=${data.id}&status=open`);
         }
       })
       .then(r => r?.json())
@@ -222,7 +226,7 @@ export default function EnterpriseProfile() {
           </div>
 
           {/* Bio */}
-          {enterprise.bio && (
+          {enterprise.bio ? (
             <div style={{
               padding: '16px',
               background: '#1a1a1a',
@@ -232,6 +236,22 @@ export default function EnterpriseProfile() {
               marginBottom: '16px'
             }}>
               {enterprise.bio}
+            </div>
+          ) : (user?.role === 'enterprise' && user?.id === enterprise.id) ? (
+            <div style={{ color: '#666', fontSize: 13, marginBottom: 10, fontStyle: 'italic' }}>
+              No bio yet — operators evaluate enterprises partly on this. Add a short one ↓
+            </div>
+          ) : null}
+
+          {/* Owner-only inline bio editor */}
+          {user?.role === 'enterprise' && user?.id === enterprise.id && (
+            <div style={{ marginBottom: 16 }}>
+              <BioEditor
+                kind="enterprise"
+                ownerId={enterprise.id}
+                initialBio={enterprise.bio}
+                onSaved={(updated) => setEnterprise(prev => ({ ...prev, bio: updated.bio }))}
+              />
             </div>
           )}
 

@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import logo from '../assets/AdobSOL.png';
+import DemoResetButton from '../components/DemoResetButton';
+import { API_BASE } from '../lib/api';
 
 function Admin() {
   const navigate = useNavigate();
@@ -20,9 +22,9 @@ function Admin() {
     setLoading(true);
     try {
       const [opRes, entRes, dbRes] = await Promise.all([
-        fetch('http://localhost:3001/api/admin/operators'),
-        fetch('http://localhost:3001/api/admin/enterprises'),
-        fetch('http://localhost:3001/api/debug/db')
+        fetch(`${API_BASE}/api/admin/operators`),
+        fetch(`${API_BASE}/api/admin/enterprises`),
+        fetch(`${API_BASE}/api/debug/db`)
       ]);
       setOperators(await opRes.json());
       setEnterprises(await entRes.json());
@@ -48,7 +50,7 @@ function Admin() {
 
   const deleteOperator = async (id, name) => {
     try {
-      await fetch(`http://localhost:3001/api/operators/${id}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/operators/${id}`, { method: 'DELETE' });
       setOperators(prev => prev.filter(o => o.id !== id));
       flash(`✅ Deleted operator: ${name}`);
     } catch { flash('❌ Failed to delete operator'); }
@@ -57,7 +59,7 @@ function Admin() {
 
   const deleteEnterprise = async (wallet, name) => {
     try {
-      await fetch(`http://localhost:3001/api/admin/enterprises/${wallet}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/admin/enterprises/${wallet}`, { method: 'DELETE' });
       setEnterprises(prev => prev.filter(e => e.wallet_address !== wallet));
       flash(`✅ Deleted enterprise: ${name}`);
     } catch { flash('❌ Failed to delete enterprise'); }
@@ -66,7 +68,7 @@ function Admin() {
 
   const clearAll = async () => {
     try {
-      await fetch('http://localhost:3001/api/admin/clear-all', { method: 'POST' });
+      await fetch(`${API_BASE}/api/admin/clear-all`, { method: 'POST' });
       clearLocalSession();
       setOperators([]); setEnterprises([]); setMissions([]);
       flash('✅ All data cleared.');
@@ -135,6 +137,11 @@ function Admin() {
         </div>
 
         {message && <div className="flash">{message}</div>}
+
+        {/* One-click demo seed (Phase 4) */}
+        <div style={{ marginBottom: '24px' }}>
+          <DemoResetButton onComplete={fetchAll} />
+        </div>
 
         {/* Current session info */}
         <div className="section-label">Current Session</div>

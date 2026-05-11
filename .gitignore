@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# build output
+dist/
+build/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# uploads (user-generated content, not source)
+server/uploads/*
+!server/uploads/.gitkeep
+
+# generated data
+server/solskies.db
+server/solskies.db-journal
+server/solskies.db-wal
+server/solskies.db-shm
+server/db.json.bak
+
+# auto-generated keys
+server/.escrow-keypair.json

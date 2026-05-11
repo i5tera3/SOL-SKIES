@@ -1,7 +1,7 @@
 import type { Address } from 'abitype'
+import type { KeyAuthorization } from 'ox/tempo'
 import type { Account } from '../../accounts/types.js'
 import { parseAccount } from '../../accounts/utils/parseAccount.js'
-import type { ReadContractReturnType } from '../../actions/public/readContract.js'
 import { readContract } from '../../actions/public/readContract.js'
 import { sendTransaction } from '../../actions/wallet/sendTransaction.js'
 import { sendTransactionSync } from '../../actions/wallet/sendTransactionSync.js'
@@ -17,9 +17,10 @@ import type { Log } from '../../types/log.js'
 import type { Compute } from '../../types/utils.js'
 import { parseEventLogs } from '../../utils/abi/parseEventLogs.js'
 import * as Abis from '../Abis.js'
-import type { AccessKeyAccount } from '../Account.js'
+import type { AccessKeyAccount, resolveAccessKey } from '../Account.js'
 import { signKeyAuthorization } from '../Account.js'
 import * as Addresses from '../Addresses.js'
+import * as Hardfork from '../Hardfork.js'
 import type {
   GetAccountParameter,
   ReadParameters,
@@ -54,7 +55,7 @@ const spendPolicies = {
  * const account = Account.from({ privateKey: '0x...' })
  * const client = createClient({
  *   account,
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -90,13 +91,17 @@ export namespace authorize {
 
   export type Args = {
     /** The access key to authorize. */
-    accessKey: Pick<AccessKeyAccount, 'accessKeyAddress' | 'keyType'>
+    accessKey: resolveAccessKey.Parameters
     /** The chain ID. */
     chainId?: number | undefined
     /** Unix timestamp when the key expires. */
     expiry?: number | undefined
     /** Spending limits per token. */
-    limits?: { token: Address; limit: bigint }[] | undefined
+    limits?:
+      | { token: Address; limit: bigint; period?: number | undefined }[]
+      | undefined
+    /** Call scopes restricting which contracts/selectors this key can call. */
+    scopes?: KeyAuthorization.Scope[] | undefined
   }
 
   export type ReturnValue = WriteContractReturnType
@@ -119,6 +124,7 @@ export namespace authorize {
       chainId = client.chain?.id,
       expiry,
       limits,
+      scopes,
       ...rest
     } = parameters
     const account_ = rest.account ?? client.account
@@ -130,6 +136,7 @@ export namespace authorize {
       key: accessKey,
       expiry,
       limits,
+      scopes,
     })
     return (await action(client, {
       ...rest,
@@ -162,7 +169,7 @@ export namespace authorize {
  * const account = Account.from({ privateKey: '0x...' })
  * const client = createClient({
  *   account,
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -233,7 +240,7 @@ export namespace authorizeSync {
  *
  * const client = createClient({
  *   account: privateKeyToAccount('0x...'),
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -305,7 +312,7 @@ export namespace revoke {
    * import { Actions } from 'viem/tempo'
    *
    * const client = createClient({
-   *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+   *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
    *   transport: http(),
    * }).extend(walletActions)
    *
@@ -325,7 +332,7 @@ export namespace revoke {
       address: Addresses.accountKeychain,
       abi: Abis.accountKeychain,
       functionName: 'revokeKey',
-      args: [resolveAccessKey(accessKey)],
+      args: [resolveAccessKeyAddress(accessKey)],
     })
   }
 
@@ -353,7 +360,7 @@ export namespace revoke {
  *
  * const client = createClient({
  *   account: privateKeyToAccount('0x...'),
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -419,7 +426,7 @@ export namespace revokeSync {
  *
  * const client = createClient({
  *   account: privateKeyToAccount('0x...'),
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -497,7 +504,7 @@ export namespace updateLimit {
    * import { Actions } from 'viem/tempo'
    *
    * const client = createClient({
-   *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+   *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
    *   transport: http(),
    * }).extend(walletActions)
    *
@@ -521,7 +528,7 @@ export namespace updateLimit {
       address: Addresses.accountKeychain,
       abi: Abis.accountKeychain,
       functionName: 'updateSpendingLimit',
-      args: [resolveAccessKey(accessKey), token, limit],
+      args: [resolveAccessKeyAddress(accessKey), token, limit],
     })
   }
 
@@ -549,7 +556,7 @@ export namespace updateLimit {
  *
  * const client = createClient({
  *   account: privateKeyToAccount('0x...'),
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -621,7 +628,7 @@ export namespace updateLimitSync {
  * import { Actions } from 'viem/tempo'
  *
  * const client = createClient({
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
@@ -697,7 +704,7 @@ export namespace getMetadata {
       address: Addresses.accountKeychain,
       abi: Abis.accountKeychain,
       functionName: 'getKey',
-      args: [account, resolveAccessKey(accessKey)],
+      args: [account, resolveAccessKeyAddress(accessKey)],
     })
   }
 }
@@ -712,20 +719,22 @@ export namespace getMetadata {
  * import { Actions } from 'viem/tempo'
  *
  * const client = createClient({
- *   chain: tempo({ feeToken: '0x20c0000000000000000000000000000000000001' }),
+ *   chain: tempo.extend({ feeToken: '0x20c0000000000000000000000000000000000001' }),
  *   transport: http(),
  * })
  *
- * const remaining = await Actions.accessKey.getRemainingLimit(client, {
+ * const { remaining, periodEnd } = await Actions.accessKey.getRemainingLimit(client, {
  *   account: '0x...',
  *   accessKey: '0x...',
  *   token: '0x...',
  * })
+ *
+ * console.log(remaining, periodEnd)
  * ```
  *
  * @param client - Client.
  * @param parameters - Parameters.
- * @returns The remaining spending amount.
+ * @returns The remaining spending amount and period end timestamp.
  */
 export async function getRemainingLimit<
   chain extends Chain | undefined,
@@ -742,10 +751,26 @@ export async function getRemainingLimit<
   } = parameters
   if (!account_) throw new Error('account is required.')
   const account = parseAccount(account_)
-  return readContract(client, {
+
+  // TODO: remove pre-t3 branch once mainnet is on t3.
+  const hardfork = (client.chain as { hardfork?: string } | undefined)?.hardfork
+  if (hardfork && Hardfork.lt(hardfork, 't3')) {
+    const remaining = await readContract(client, {
+      ...rest,
+      ...getRemainingLimit.call({ account: account.address, accessKey, token }),
+    })
+    return { remaining, periodEnd: undefined }
+  }
+
+  const [remaining, periodEnd] = await readContract(client, {
     ...rest,
-    ...getRemainingLimit.call({ account: account.address, accessKey, token }),
+    ...getRemainingLimit.callWithPeriod({
+      account: account.address,
+      accessKey,
+      token,
+    }),
   })
+  return { remaining, periodEnd }
 }
 
 export namespace getRemainingLimit {
@@ -764,14 +789,13 @@ export namespace getRemainingLimit {
     token: Address
   }
 
-  export type ReturnValue = ReadContractReturnType<
-    typeof Abis.accountKeychain,
-    'getRemainingLimit',
-    never
-  >
+  export type ReturnValue = {
+    remaining: bigint
+    periodEnd: bigint | undefined
+  }
 
   /**
-   * Defines a call to the `getRemainingLimit` function.
+   * Defines a call to the `getRemainingLimit` function (pre-T3).
    *
    * @param args - Arguments.
    * @returns The call.
@@ -782,7 +806,23 @@ export namespace getRemainingLimit {
       address: Addresses.accountKeychain,
       abi: Abis.accountKeychain,
       functionName: 'getRemainingLimit',
-      args: [account, resolveAccessKey(accessKey), token],
+      args: [account, resolveAccessKeyAddress(accessKey), token],
+    })
+  }
+
+  /**
+   * Defines a call to the `getRemainingLimitWithPeriod` function (T3+).
+   *
+   * @param args - Arguments.
+   * @returns The call.
+   */
+  export function callWithPeriod(args: Args) {
+    const { account, accessKey, token } = args
+    return defineCall({
+      address: Addresses.accountKeychain,
+      abi: Abis.accountKeychain,
+      functionName: 'getRemainingLimitWithPeriod',
+      args: [account, resolveAccessKeyAddress(accessKey), token],
     })
   }
 }
@@ -838,20 +878,26 @@ export namespace signAuthorization {
     account extends Account | undefined = Account | undefined,
   > = GetAccountParameter<account> & {
     /** The access key to authorize. */
-    accessKey: Pick<AccessKeyAccount, 'accessKeyAddress' | 'keyType'>
+    accessKey: resolveAccessKey.Parameters
     /** The chain ID. */
     chainId?: number | undefined
     /** Unix timestamp when the key expires. */
     expiry?: number | undefined
     /** Spending limits per token. */
-    limits?: { token: Address; limit: bigint }[] | undefined
+    limits?:
+      | { token: Address; limit: bigint; period?: number | undefined }[]
+      | undefined
+    /** Call scopes restricting which contracts/selectors this key can call. */
+    scopes?: KeyAuthorization.Scope[] | undefined
   }
 
   export type ReturnValue = Awaited<ReturnType<typeof signKeyAuthorization>>
 }
 
 /** @internal */
-function resolveAccessKey(accessKey: Address | AccessKeyAccount): Address {
+function resolveAccessKeyAddress(
+  accessKey: Address | AccessKeyAccount,
+): Address {
   if (typeof accessKey === 'string') return accessKey
   return accessKey.accessKeyAddress
 }

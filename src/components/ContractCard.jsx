@@ -1,3 +1,4 @@
+import { API_BASE } from '../lib/api';
 import { useState, useEffect } from 'react';
 
 export default function ContractCard({
@@ -15,7 +16,7 @@ export default function ContractCard({
   useEffect(() => {
     if (!mission.latitude || !mission.longitude) return;
     setLoadingWeather(true);
-    fetch(`http://localhost:3001/api/weather?lat=${mission.latitude}&lng=${mission.longitude}`)
+    fetch(`${API_BASE}/api/weather?lat=${mission.latitude}&lng=${mission.longitude}`)
       .then(r => r.json())
       .then(data => {
         const today = data.daily?.[0];

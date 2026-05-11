@@ -3,57 +3,28 @@ import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import bs58 from 'bs58';
+import toast from 'react-hot-toast';
 import logo from '../assets/AdobSOL.png';
-import { SigninMessage } from '../utils/SigninMessage';
 import { useSession } from '../Context/sessionContext';
+import { signInWithWallet } from '../lib/api';
 
 function Login() {
   const navigate = useNavigate();
-  const { login } = useSession();
+  const { user, loading: sessionLoading, login } = useSession();
   const { publicKey, connected, disconnect, signMessage } = useWallet();
   const { setVisible } = useWalletModal();
-  
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [rememberMe, setRememberMe] = useState(false);
-  const [checkingSession, setCheckingSession] = useState(true);
   const [loginAttempted, setLoginAttempted] = useState(false);
 
-  // Check if user is already logged in via session
+  // If sessionContext validates a cached JWT, route them straight to dashboard.
   useEffect(() => {
-    const checkExistingSession = () => {
-      const session = localStorage.getItem('solskies_session');
-      if (!session) {
-        setCheckingSession(false);
-        return;
-      }
-
-      try {
-        const sessionData = JSON.parse(session);
-        
-        if (Date.now() > sessionData.expiresAt) {
-          localStorage.removeItem('solskies_session');
-          localStorage.removeItem('solskies_user');
-          setCheckingSession(false);
-          return;
-        }
-
-        const dashboardPath = sessionData.user?.role === 'operator' 
-          ? '/operator/dashboard' 
-          : '/enterprise/dashboard';
-        
-        navigate(dashboardPath, { replace: true });
-      } catch (err) {
-        console.error('Error parsing session:', err);
-        localStorage.removeItem('solskies_session');
-        localStorage.removeItem('solskies_user');
-        setCheckingSession(false);
-      }
-    };
-
-    checkExistingSession();
-  }, [navigate]);
+    if (sessionLoading || !user) return;
+    const dashboardPath = user.role === 'operator' ? '/operator/dashboard' : '/enterprise/dashboard';
+    navigate(dashboardPath, { replace: true });
+  }, [user, sessionLoading, navigate]);
 
   // Fix wallet auto-login effect - include publicKey dependency
   useEffect(() => {
@@ -75,8 +46,6 @@ function Login() {
   };
 
   const handleWalletLogin = async () => {
-    console.log('1. Starting wallet login...');
-    
     if (!connected || !publicKey || !signMessage) {
       setError("Wallet not connected or does not support message signing");
       return;
@@ -86,82 +55,25 @@ function Login() {
     setError("");
 
     try {
-      const nonce = crypto.randomUUID();
-      console.log('2. Nonce generated:', nonce);
-      
-      const message = new SigninMessage({
-        domain: window.location.host,
-        publicKey: publicKey.toBase58(),
-        nonce: nonce,
-        statement: 'Sign this message to authenticate with Sol Skies.'
-      });
+      // Server-driven challenge + signature verification + JWT issuance.
+      // signInWithWallet handles: POST /wallet-challenge → signMessage → POST /wallet-login.
+      const result = await signInWithWallet(publicKey.toBase58(), signMessage);
 
-      console.log('3. Message prepared:', message.prepare());
-      
-      const encodedMessage = new TextEncoder().encode(message.prepare());
-      console.log('4. Requesting signature...');
-      
-      const signature = await signMessage(encodedMessage);
-      console.log('5. Signature obtained:', bs58.encode(signature).substring(0, 20) + '...');
-      
-      console.log('6. Sending to backend...');
-      const response = await fetch('http://localhost:3001/api/auth/wallet-login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          walletAddress: publicKey.toBase58(),
-          signature: bs58.encode(signature),
-          message: message.prepare(),
-          nonce: nonce
-        }),
-      });
+      // Persist the user + JWT into the session context (also writes to localStorage).
+      login(result.user, result.token);
+      toast.success(`Welcome back, ${result.user.fullName || result.user.username || result.user.companyName || result.user.role}`);
 
-      console.log('7. Response status:', response.status);
-      const data = await response.json();
-      console.log('8. Response data:', data);
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Authentication failed');
-      }
-
-      console.log('9. Login successful, creating session...');
-      const expiresAt = rememberMe 
-        ? Date.now() + (30 * 24 * 60 * 60 * 1000)
-        : Date.now() + (24 * 60 * 60 * 1000);
-
-      const sessionData = {
-        user: data.user,
-        walletAddress: publicKey.toBase58(),
-        loggedInAt: Date.now(),
-        expiresAt: expiresAt,
-        rememberMe: rememberMe
-      };
-
-      localStorage.setItem('solskies_session', JSON.stringify(sessionData));
-      localStorage.setItem('solskies_user', JSON.stringify(data.user));
-
-      // FIX: update SessionContext in-memory state immediately so ProtectedRoute
-      // sees isAuthenticated=true before the navigation renders the dashboard.
-      login(data.user, rememberMe);
-
-      console.log('10. Session stored, navigating to:', data.user.role === 'operator' ? '/operator/dashboard' : '/enterprise/dashboard');
-      const dashboardPath = data.user.role === 'operator' ? '/operator/dashboard' : '/enterprise/dashboard';
+      const dashboardPath = result.user.role === 'operator'
+        ? '/operator/dashboard'
+        : '/enterprise/dashboard';
       navigate(dashboardPath, { replace: true });
-
-    } catch (error) {
-      console.error('❌ Login error:', error);
-      setError(error.message || "Authentication failed. Please try again.");
-      
-      try {
-        if (connected) {
-          await disconnect();
-        }
-      } catch (e) {
-        console.error('Error disconnecting wallet:', e);
-      }
-      
+    } catch (err) {
+      console.error('Login error:', err);
+      const msg = err.message || "Authentication failed. Please try again.";
+      const friendly = msg.includes('not registered') ? "This wallet isn't registered. Try signing up instead." : msg;
+      setError(friendly);
+      toast.error(friendly);
+      try { if (connected) await disconnect(); } catch {}
       setLoginAttempted(false);
     } finally {
       setLoading(false);
@@ -177,7 +89,7 @@ function Login() {
     }
   };
 
-  if (checkingSession) {
+  if (sessionLoading) {
     return (
       <div style={{
         minHeight: '100vh',

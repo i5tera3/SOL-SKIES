@@ -5,8 +5,12 @@
 // Enterprise deposits SOL → escrow on mission creation.
 // Server pays operator from escrow on contract completion.
 //
-// Escrow pubkey: Dx9ey3aYGcpJn1XWNBknC2BvGBpS9TwGAWpRkFGTFf1m
 // Network: Devnet (free SOL via airdrop — no paywall)
+//
+// SECURITY: The keypair is loaded from ESCROW_SECRET_KEY (env). If unset, a
+// fresh keypair is generated and persisted to server/.escrow-keypair.json
+// (gitignored). NEVER commit a real private key to source. NEVER reuse this
+// devnet key for mainnet — replace with an Anchor PDA escrow program first.
 
 import {
   Connection,
@@ -18,16 +22,52 @@ import {
   sendAndConfirmTransaction,
   clusterApiUrl,
 } from '@solana/web3.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-// ─── Escrow keypair (devnet — NOT mainnet, safe to store) ────────────────────
-const ESCROW_SECRET = Uint8Array.from([
-  182,232,110,193,139,154,33,80,229,183,150,120,34,242,151,118,
-  172,251,42,121,102,212,194,95,249,204,173,5,241,11,243,245,
-  192,108,249,48,67,181,11,173,12,181,136,4,63,107,108,127,
-  137,207,70,156,162,160,155,77,217,223,210,251,110,114,190,180
-]);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const KEYPAIR_FILE = path.join(__dirname, '.escrow-keypair.json');
 
-export const escrowKeypair = Keypair.fromSecretKey(ESCROW_SECRET);
+// ─── Load or generate the escrow keypair ─────────────────────────────────────
+function loadEscrowKeypair() {
+  // 1. Prefer env var (production / shared deployments).
+  const envSecret = process.env.ESCROW_SECRET_KEY;
+  if (envSecret) {
+    try {
+      const arr = JSON.parse(envSecret);
+      if (!Array.isArray(arr) || arr.length !== 64) {
+        throw new Error('must be a JSON array of 64 bytes');
+      }
+      return Keypair.fromSecretKey(Uint8Array.from(arr));
+    } catch (e) {
+      throw new Error(`Invalid ESCROW_SECRET_KEY: ${e.message}`);
+    }
+  }
+
+  // 2. Fall back to a persisted file (gitignored — survives restarts).
+  if (fs.existsSync(KEYPAIR_FILE)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(KEYPAIR_FILE, 'utf8'));
+      return Keypair.fromSecretKey(Uint8Array.from(raw));
+    } catch (e) {
+      console.warn('[escrow] .escrow-keypair.json unreadable, regenerating:', e.message);
+    }
+  }
+
+  // 3. Generate fresh and persist.
+  const kp = Keypair.generate();
+  fs.writeFileSync(KEYPAIR_FILE, JSON.stringify(Array.from(kp.secretKey)));
+  console.warn(
+    '[escrow] No ESCROW_SECRET_KEY set — generated a fresh devnet keypair.\n' +
+    `         Address: ${kp.publicKey.toBase58()}\n` +
+    `         Persisted to ${KEYPAIR_FILE} (gitignored).`
+  );
+  return kp;
+}
+
+export const escrowKeypair = loadEscrowKeypair();
 export const ESCROW_ADDRESS = escrowKeypair.publicKey.toBase58();
 
 // ─── Devnet connection ────────────────────────────────────────────────────────
@@ -86,7 +126,6 @@ export async function verifyDeposit(txSignature, fromWallet, expectedLamports) {
         ix.parsed?.type === 'transfer' &&
         ix.parsed?.info?.destination === ESCROW_ADDRESS
       ) {
-        // Optionally verify sender matches
         if (fromWallet && ix.parsed.info.source !== fromWallet) continue;
         deposited += ix.parsed.info.lamports || 0;
       }
@@ -110,10 +149,10 @@ export async function verifyDeposit(txSignature, fromWallet, expectedLamports) {
 // Called by server when enterprise completes a contract.
 export async function payOperator(operatorWallet, lamports) {
   try {
-    await ensureEscrowFunded(lamports + 5000); // keep a little extra for fees
+    await ensureEscrowFunded(lamports + 5000);
 
     const toPubkey = new PublicKey(operatorWallet);
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
 
     const transaction = new Transaction({
       recentBlockhash: blockhash,

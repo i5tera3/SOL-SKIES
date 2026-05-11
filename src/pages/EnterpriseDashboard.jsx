@@ -1,3 +1,4 @@
+import { API_BASE } from '../lib/api';
 // src/pages/EnterpriseDashboard.jsx
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -6,9 +7,24 @@ import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana
 import { useSession } from '../Context/sessionContext'; // FIX: correct path + filename
 import logo from '../assets/AdobSOL.png'; // FIX: file is at src/pages/ not src/pages/enterprise/
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import DisputeModal from '../components/DisputeModal';
+// Phase 6 — tabs decomposed.
+import DashboardTab from './enterprise/tabs/DashboardTab';
+import MissionsTab from './enterprise/tabs/MissionsTab';
+import HistoryTab from './enterprise/tabs/HistoryTab';
+import FindOperatorsTab from './enterprise/tabs/FindOperatorsTab';
 
-// Devnet escrow address (server-held keypair — free devnet SOL, no paywall)
-const ESCROW_ADDRESS = 'Dx9ey3aYGcpJn1XWNBknC2BvGBpS9TwGAWpRkFGTFf1m';
+// Devnet escrow address — fetched lazily from /api/escrow/info so the frontend
+// stays in sync if the server's keypair is regenerated. Cached for the page life.
+let _escrowAddressCache = null;
+async function fetchEscrowAddress() {
+  if (_escrowAddressCache) return _escrowAddressCache;
+  const r = await fetch(`${API_BASE}/api/escrow/info`);
+  if (!r.ok) throw new Error('Failed to fetch escrow address');
+  const { address } = await r.json();
+  _escrowAddressCache = address;
+  return address;
+}
 
 const ENTERPRISE_STYLES = `
     * {
@@ -672,7 +688,15 @@ function EnterpriseDashboard() {
   const [missions, setMissions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('dashboard');
+  // Honor a `?tab=` query so other pages (e.g. ContactOperatorButton's redirect
+  // from a public operator profile) can jump directly into the right tab.
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      if (t && ['dashboard', 'missions', 'history', 'find', 'chat', 'settings'].includes(t)) return t;
+    } catch {}
+    return 'dashboard';
+  });
   const [showCreateMissionModal, setShowCreateMissionModal] = useState(false);
 
   // Fetch live SOL/USD price from CoinGecko (free, no key)
@@ -705,6 +729,7 @@ function EnterpriseDashboard() {
   const [activeContracts, setActiveContracts] = useState([]);
   // Rating modal state
   const [ratingModal, setRatingModal] = useState(null); // { contract }
+  const [disputeFor, setDisputeFor] = useState(null);    // contract id, opens DisputeModal
   const [ratingStars, setRatingStars] = useState(5);
   const [ratingComment, setRatingComment] = useState('');
   const [ratingSubmitting, setRatingSubmitting] = useState(false);
@@ -827,8 +852,8 @@ function EnterpriseDashboard() {
     try {
       // Parallelize both requests — no need to wait for enterprise before fetching missions
       const [enterpriseResponse, missionsResponse] = await Promise.all([
-        fetch(`http://localhost:3001/api/enterprises/${userId}`),
-        fetch(`http://localhost:3001/api/missions?enterprise_id=${userId}`)
+        fetch(`${API_BASE}/api/enterprises/${userId}`),
+        fetch(`${API_BASE}/api/missions?enterprise_id=${userId}`)
       ]);
 
       if (!isMounted) return;
@@ -860,7 +885,7 @@ function EnterpriseDashboard() {
   // Fetch active contracts for this enterprise (progress control + rating)
   const fetchActiveContracts = async (userId, isMounted = true) => {
     try {
-      const res = await fetch(`http://localhost:3001/api/contracts?enterprise_id=${userId}&status=active`);
+      const res = await fetch(`${API_BASE}/api/contracts?enterprise_id=${userId}&status=active`);
       if (!isMounted) return;
       if (res.ok) {
         const data = await res.json();
@@ -874,7 +899,7 @@ function EnterpriseDashboard() {
   // Update contract progress (enterprise side — tracks operator progress)
   const updateContractProgress = async (contractId, progress) => {
     try {
-      await fetch(`http://localhost:3001/api/contracts/${contractId}`, {
+      await fetch(`${API_BASE}/api/contracts/${contractId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ progress: parseInt(progress) })
@@ -900,7 +925,7 @@ function EnterpriseDashboard() {
     setRatingSubmitting(true);
     try {
       // 1. Mark contract complete + save rating
-      const res = await fetch(`http://localhost:3001/api/contracts/${ratingModal.id}/complete`, {
+      const res = await fetch(`${API_BASE}/api/contracts/${ratingModal.id}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating: ratingStars, comment: ratingComment })
@@ -914,7 +939,7 @@ function EnterpriseDashboard() {
       // 2. Release escrow payment to operator on devnet
       let payoutMsg = '';
       try {
-        const payRes = await fetch(`http://localhost:3001/api/contracts/${ratingModal.id}/release-payment`, {
+        const payRes = await fetch(`${API_BASE}/api/contracts/${ratingModal.id}/release-payment`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1016,18 +1041,27 @@ function EnterpriseDashboard() {
         })),
       };
 
-      const missionRes = await fetch('http://localhost:3001/api/missions', {
+      const missionRes = await fetch(`${API_BASE}/api/missions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(missionData),
       });
 
-      if (!missionRes.ok) throw new Error('Failed to create mission in database');
+      if (!missionRes.ok) {
+        // Surface the server's real error so future bugs are diagnosable in one shot.
+        let detail = 'Server rejected the request';
+        try {
+          const err = await missionRes.json();
+          detail = err.message || err.error || detail;
+          if (err.field) detail = `${err.field}: ${err.message || detail}`;
+        } catch {}
+        throw new Error(detail);
+      }
       createdMission = await missionRes.json();
 
       // ── Step 2: Build SOL transfer to escrow ──────────────────────────────
       const lamports = Math.round(rewardSol * LAMPORTS_PER_SOL);
-      const escrowPubkey = new PublicKey(ESCROW_ADDRESS);
+      const escrowPubkey = new PublicKey(await fetchEscrowAddress());
 
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
       const tx = new Transaction({
@@ -1048,7 +1082,7 @@ function EnterpriseDashboard() {
       await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
 
       // ── Step 5: Verify deposit server-side, stamp mission ─────────────────
-      const verifyRes = await fetch('http://localhost:3001/api/escrow/verify-deposit', {
+      const verifyRes = await fetch(`${API_BASE}/api/escrow/verify-deposit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1092,7 +1126,7 @@ function EnterpriseDashboard() {
       // If mission was created but tx failed, delete orphaned mission
       if (createdMission?.id) {
         try {
-          await fetch(`http://localhost:3001/api/missions/${createdMission.id}`, { method: 'DELETE' }).catch(() => {});
+          await fetch(`${API_BASE}/api/missions/${createdMission.id}`, { method: 'DELETE' }).catch(() => {});
         } catch (_) {}
       }
       if (error.name === 'WalletSignTransactionError' || error.message?.includes('User rejected')) {
@@ -1119,23 +1153,71 @@ function EnterpriseDashboard() {
     }
   };
 
-  // Load contracts for chat sidebar (operator contacts)
-  const fetchChatContracts = async () => {
+  // ── Chat sidebar feed ──────────────────────────────────────────────────────
+  // Two parallel message systems exist in this codebase:
+  //   1. Legacy per-contract messages       — /api/messages keyed by contract_id
+  //   2. Phase-2 conversation threads       — /api/conversations[/<id>/messages]
+  // The "Message" button on operator profile creates a Phase-2 conversation
+  // (which can exist BEFORE any contract). To make the sidebar show both,
+  // fetch both feeds and stamp each row with a `kind` so handlers route correctly.
+  const fetchChatFeed = async () => {
     if (!sessionUser?.id) return;
     try {
-      const res = await fetch(`http://localhost:3001/api/contracts?enterprise_id=${sessionUser.id}`);
-      const data = await res.json();
-      setChatContracts(data || []);
-    } catch (err) { console.error('fetchChatContracts:', err); }
-  };
+      const [contractsRes, convsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/contracts?enterprise_id=${sessionUser.id}`),
+        fetch(`${API_BASE}/api/conversations?user_id=${sessionUser.id}&role=enterprise`),
+      ]);
+      const contracts = contractsRes.ok ? await contractsRes.json() : [];
+      const convs     = convsRes.ok     ? await convsRes.json()     : [];
 
-  // Load messages for selected chat contact
-  const loadChatMessages = async (contract) => {
-    setChatContact(contract);
+      // Conversations linked to contracts dedupe against the contracts list.
+      const convContractIds = new Set(convs.map(c => c.contract_id).filter(Boolean));
+      const contractRows = (Array.isArray(contracts) ? contracts : [])
+        .filter(c => !convContractIds.has(c.id))
+        .map(c => ({
+          id: c.id, kind: 'contract',
+          title: c.title || 'Contract',
+          subtitle: c.operator_username ? `@${c.operator_username}` : (c.operator_id?.slice(0,8) + '…'),
+          operator_id: c.operator_id,
+          last_message_time: c.created_at,
+        }));
+      const convRows = (Array.isArray(convs) ? convs : []).map(c => ({
+        id: c.id, kind: 'conversation',
+        title: c.other_name || 'Operator',
+        subtitle: c.last_message ? c.last_message.slice(0, 40) : 'New conversation',
+        operator_id: c.operator_id,
+        contract_id: c.contract_id,
+        last_message_time: c.last_message_time || c.created_at,
+        unread_count: c.unread_count || 0,
+      }));
+
+      // Newest activity first.
+      const merged = [...convRows, ...contractRows]
+        .sort((a, b) => (b.last_message_time || 0) - (a.last_message_time || 0));
+      setChatContracts(merged);
+    } catch (err) { console.error('fetchChatFeed:', err); }
+  };
+  // Keep the old name as an alias so the existing effect/callers don't break.
+  const fetchChatContracts = fetchChatFeed;
+
+  // Normalize a server message row (legacy or Phase-2) into one shape the
+  // render code can use unconditionally.
+  const normalizeMessage = (m, kind) => ({
+    id: m.id,
+    body: m.text ?? m.content ?? '',
+    sender_kind: (m.sender_type || m.sender_role) === 'enterprise' ? 'mine' : 'theirs',
+    timestamp: m.timestamp,
+  });
+
+  const loadChatMessages = async (item) => {
+    setChatContact(item);
     try {
-      const res = await fetch(`http://localhost:3001/api/messages/${contract.id}`);
+      const url = item.kind === 'conversation'
+        ? `${API_BASE}/api/conversations/${item.id}/messages`
+        : `${API_BASE}/api/messages/${item.id}`;
+      const res = await fetch(url);
       const data = await res.json();
-      setChatMessages(data || []);
+      setChatMessages((data || []).map(m => normalizeMessage(m, item.kind)));
     } catch (err) { console.error('loadChatMessages:', err); }
   };
 
@@ -1144,19 +1226,29 @@ function EnterpriseDashboard() {
     const text = chatInput;
     setChatInput('');
     try {
-      const res = await fetch('http://localhost:3001/api/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contract_id: chatContact.id,
-          sender_type: 'enterprise',
-          sender_id: sessionUser?.id,
-          text
-        })
-      });
+      let res;
+      if (chatContact.kind === 'conversation') {
+        res = await fetch(`${API_BASE}/api/conversations/${chatContact.id}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
+        });
+      } else {
+        // Legacy contract flow
+        res = await fetch(`${API_BASE}/api/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contract_id: chatContact.id,
+            sender_type: 'enterprise',
+            sender_id: sessionUser?.id,
+            text,
+          }),
+        });
+      }
       if (res.ok) {
         const msg = await res.json();
-        setChatMessages(prev => [...prev, msg]);
+        setChatMessages(prev => [...prev, normalizeMessage(msg, chatContact.kind)]);
       }
     } catch (err) { console.error('sendChatMessage:', err); }
   };
@@ -1178,7 +1270,7 @@ function EnterpriseDashboard() {
     setSelectedMissionApplicants(mission);
     setLoadingApplicants(true);
     try {
-      const res = await fetch(`http://localhost:3001/api/missions/${mission.id}/applications`);
+      const res = await fetch(`${API_BASE}/api/missions/${mission.id}/applications`);
       const data = await res.json();
       setApplicants(data || []);
     } catch (err) {
@@ -1191,7 +1283,7 @@ function EnterpriseDashboard() {
 
   const approveApplicant = async (applicationId) => {
     try {
-      await fetch(`http://localhost:3001/api/applications/${applicationId}`, {
+      await fetch(`${API_BASE}/api/applications/${applicationId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'approved' })
@@ -1205,7 +1297,7 @@ function EnterpriseDashboard() {
 
   const rejectApplicant = async (applicationId) => {
     try {
-      await fetch(`http://localhost:3001/api/applications/${applicationId}`, {
+      await fetch(`${API_BASE}/api/applications/${applicationId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'rejected' })
@@ -1280,360 +1372,19 @@ function EnterpriseDashboard() {
     );
   }
 
-  const DashboardTab = () => (
-    <>
-      {/* Wallet Section */}
-      <div className="wallet-section">
-        <div className="wallet-card-large">
-          <div className="wallet-header">
-            <h3>💰 Wallet Balance</h3>
-            <button
-              className="primary-btn small"
-              onClick={refreshWalletBalance}
-              title="Refresh balance"
-            >
-              ↻ Refresh
-            </button>
-          </div>
-          <div className="balance-display">
-            <span className="balance-label">SOL Balance (Devnet)</span>
-            <span className="balance-amount">{balance.toFixed(4)} SOL</span>
-          </div>
-          {solPrice && (
-            <div style={{ color: '#9333ea', fontSize: 14, marginBottom: 8 }}>
-              ≈ {(balance * solPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} USD
-            </div>
-          )}
-          {!solPrice && (
-            <div style={{ color: '#555', fontSize: 12 }}>Fetching USD price…</div>
-          )}
-          <div className="wallet-address-info">
-            <span>Wallet: {maskWalletAddress(publicKey?.toBase58())}</span>
-          </div>
-        </div>
-
-        {/* Quick Stats */}
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-value">{missions.length}</div>
-            <div className="stat-label">Total Missions</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{activeMissions.length}</div>
-            <div className="stat-label">Active</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{completedMissions.length}</div>
-            <div className="stat-label">Completed</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{balance.toFixed(3)}</div>
-            <div className="stat-label">SOL Balance{solPrice ? ` ≈ ${(balance * solPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })}` : ''}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Create Mission Button */}
-      <div style={{ margin: '30px 0' }}>
-        <button
-          className="primary-btn large"
-          onClick={() => setShowCreateMissionModal(true)}
-        >
-          ✈️ Create New Mission
-        </button>
-      </div>
-
-      {/* ── Active Contracts Section ────────────────────────────────────────── */}
-      {activeContracts.length > 0 && (
-        <div style={{ marginBottom: 36 }}>
-          <h2 className="section-title">🤝 Active Contracts</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {activeContracts.map(contract => (
-              <div key={contract.id} style={{
-                background: '#111', border: '1px solid #222', borderRadius: 20,
-                padding: 24
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-                  <div>
-                    <div style={{ color: 'white', fontWeight: 700, fontSize: 17 }}>{contract.title}</div>
-                    <div style={{ color: '#888', fontSize: 13, marginTop: 4 }}>
-                      Operator: <span style={{ color: '#9333ea' }}>
-                        {contract.operator_name || 'Operator'}{contract.operator_username ? ` (@${contract.operator_username})` : ''}
-                      </span>
-                      {contract.region && <> · 📍 {contract.region}</>}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ color: '#22c55e', fontWeight: 700, fontSize: 16 }}>
-                      {contract.amount_sol} SOL{solPrice ? ` ≈ ${(contract.amount_sol * solPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })}` : ''}
-                    </div>
-                    <div style={{ color: '#555', fontSize: 12 }}>In Escrow</div>
-                  </div>
-                </div>
-
-                {/* Progress slider */}
-                <div style={{ marginBottom: 14 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ color: '#888', fontSize: 13 }}>Mission Progress</span>
-                    <span style={{ color: 'white', fontWeight: 600, fontSize: 13 }}>{contract.progress || 0}%</span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <input
-                      type="range" min="0" max="100" step="5"
-                      value={contract.progress || 0}
-                      onChange={e => updateContractProgress(contract.id, e.target.value)}
-                      style={{ flex: 1, accentColor: '#9333ea', cursor: 'pointer' }}
-                    />
-                  </div>
-                  <div style={{ height: 6, background: '#222', borderRadius: 3, marginTop: 8 }}>
-                    <div style={{
-                      height: '100%', borderRadius: 3,
-                      width: `${contract.progress || 0}%`,
-                      background: (contract.progress || 0) >= 100
-                        ? 'linear-gradient(90deg,#22c55e,#16a34a)'
-                        : 'linear-gradient(90deg,#9333ea,#a855f7)',
-                      transition: 'width .3s ease'
-                    }} />
-                  </div>
-                </div>
-
-                {/* Complete & Rate button — only available at 100% */}
-                {(contract.progress || 0) >= 100 ? (
-                  <button
-                    onClick={() => openRatingModal(contract)}
-                    style={{
-                      width: '100%', padding: '12px 0',
-                      background: 'linear-gradient(135deg,#22c55e,#16a34a)',
-                      border: 'none', borderRadius: 12, color: 'white',
-                      fontWeight: 700, fontSize: 15, cursor: 'pointer'
-                    }}
-                  >
-                    ✓ Complete & Rate Operator
-                  </button>
-                ) : (
-                  <div style={{ color: '#555', fontSize: 12, textAlign: 'center', paddingTop: 4 }}>
-                    Drag slider to 100% to complete this contract
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Active Missions Section */}
-      <div className="missions-section">
-        <h2 className="section-title">Active Missions</h2>
-        {activeMissions.length > 0 ? (
-          <div className="missions-grid">
-            {activeMissions.map(mission => (
-              <div key={mission.id} className="mission-card">
-                <div className="mission-header">
-                  <h3>{mission.title}</h3>
-                  <span className="mission-status" style={{
-                    background: `${getStatusColor(mission.status)}20`,
-                    color: getStatusColor(mission.status),
-                    border: `1px solid ${getStatusColor(mission.status)}30`
-                  }}>
-                    {mission.status}
-                  </span>
-                </div>
-                <div className="mission-type">{mission.missionType}</div>
-                <div className="mission-details">
-                  <div className="detail-item">
-                    <span className="detail-label">📍 Region</span>
-                    <span className="detail-value">{mission.region}</span>
-                  </div>
-                  <div className="detail-item">
-                    <span className="detail-label">💰 Reward</span>
-                    <span className="detail-value">{mission.reward} SOL{mission.escrow_tx && <a href={`https://explorer.solana.com/tx/${mission.escrow_tx}?cluster=devnet`} target="_blank" rel="noopener noreferrer" style={{marginLeft:6,fontSize:10,color:'#9333ea'}}>🔗 Escrow tx</a>}</span>
-                  </div>
-                  <div className="detail-item">
-                    <span className="detail-label">📋 Requirements</span>
-                    <span className="detail-value">
-                      {mission.requirements.minFlightHours}h min • 
-                      {mission.requirements.droneType}
-                    </span>
-                  </div>
-                </div>
-                <div className="mission-actions">
-                  <button className="action-btn" onClick={() => fetchApplicants(mission)}>View Applicants</button>
-                  <button className="action-btn primary" onClick={() => setShowCreateMissionModal(true)}>+ New Mission</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">
-            <div className="empty-icon">📭</div>
-            <h3>No Active Missions</h3>
-            <p>Create your first mission to get started</p>
-          </div>
-        )}
-      </div>
-    </>
-  );
-
-  const MissionsTab = () => (
-    <div>
-      <h2 className="section-title">All Missions</h2>
-      
-      {/* Filters */}
-      <div className="filters-bar">
-        <input
-          type="text"
-          placeholder="🔍 Search missions..."
-          className="search-input"
-        />
-        <select className="filter-select">
-          <option value="all">All Status</option>
-          <option value="open">Open</option>
-          <option value="assigned">Assigned</option>
-          <option value="completed">Completed</option>
-          <option value="expired">Expired</option>
-        </select>
-      </div>
-
-      {missions.length > 0 ? (
-        <div className="missions-grid">
-          {missions.map(mission => (
-            <div key={mission.id} className="mission-card">
-              <div className="mission-header">
-                <h3>{mission.title}</h3>
-                <span className="mission-status" style={{
-                  background: `${getStatusColor(mission.status)}20`,
-                  color: getStatusColor(mission.status),
-                  border: `1px solid ${getStatusColor(mission.status)}30`
-                }}>
-                  {mission.status}
-                </span>
-              </div>
-              <div className="mission-type">{mission.missionType}</div>
-              <div className="mission-details">
-                <div className="detail-item">
-                  <span className="detail-label">📍 Region</span>
-                  <span className="detail-value">{mission.region}</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">💰 Reward</span>
-                  <span className="detail-value">{mission.reward} SOL{mission.escrow_tx && <a href={`https://explorer.solana.com/tx/${mission.escrow_tx}?cluster=devnet`} target="_blank" rel="noopener noreferrer" style={{marginLeft:6,fontSize:10,color:'#9333ea'}}>🔗 Escrow tx</a>}</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">📅 Created</span>
-                  <span className="detail-value">
-                    {new Date(mission.created_at).toLocaleDateString()}
-                  </span>
-                </div>
-              </div>
-              <div className="mission-actions">
-                <button className="action-btn">View Details</button>
-                {mission.status === 'open' && (
-                  <button className="action-btn primary">Edit</button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <div className="empty-icon">📋</div>
-          <h3>No Missions Yet</h3>
-          <p>Create your first mission to get started</p>
-        </div>
-      )}
-    </div>
-  );
-
-  const HistoryTab = () => (
-    <div>
-      <h2 className="section-title">Mission History</h2>
-      {completedMissions.length > 0 ? (
-        <div className="missions-grid">
-          {completedMissions.map(mission => (
-            <div key={mission.id} className="mission-card completed">
-              <div className="mission-header">
-                <h3>{mission.title}</h3>
-                <span className="mission-status" style={{
-                  background: `${getStatusColor(mission.status)}20`,
-                  color: getStatusColor(mission.status),
-                  border: `1px solid ${getStatusColor(mission.status)}30`
-                }}>
-                  {mission.status}
-                </span>
-              </div>
-              <div className="mission-type">{mission.missionType}</div>
-              <div className="mission-details">
-                <div className="detail-item">
-                  <span className="detail-label">👤 Operator</span>
-                  <span className="detail-value">{mission.operator_name || 'N/A'}</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">💰 Paid</span>
-                  <span className="detail-value">{mission.reward} SOL{mission.escrow_tx && <a href={`https://explorer.solana.com/tx/${mission.escrow_tx}?cluster=devnet`} target="_blank" rel="noopener noreferrer" style={{marginLeft:6,fontSize:10,color:'#9333ea'}}>🔗 Escrow tx</a>}</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">📅 Completed</span>
-                  <span className="detail-value">
-                    {new Date(mission.completed_at).toLocaleDateString()}
-                  </span>
-                </div>
-              </div>
-              <div className="mission-actions">
-                <button className="action-btn">View Report</button>
-                <button className="action-btn">Rate Operator</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <div className="empty-icon">📜</div>
-          <h3>No Mission History</h3>
-          <p>Completed missions will appear here</p>
-        </div>
-      )}
-    </div>
-  );
-
-  // Deposit Modal — REMOVED (replaced by live devnet SOL wallet balance)
-  // eslint-disable-next-line no-unused-vars
-  const _DepositModal_REMOVED = () => (
-    <div className="modal-overlay">
-      <div className="modal-content" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Removed</h2>
-          <button className="close-btn">✕</button>
-        </div>
-        <div className="modal-body">
-          <p className="modal-description">
-            Balance is now your live devnet SOL wallet balance.
-          </p>
-          <div className="input-group">
-            <label>N/A</label>
-            <input
-              type="number"
-              value={''}
-              onChange={() => {}}
-              placeholder=""
-              min="1"
-              step="1"
-            />
-          </div>
-          <div className="suggested-amounts">
-            <button onClick={() => setDepositAmount('100')}>100</button>
-            <button onClick={() => setDepositAmount('500')}>500</button>
-            <button onClick={() => setDepositAmount('1000')}>1000</button>
-            <button onClick={() => setDepositAmount('5000')}>5000</button>
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="secondary-btn" onClick={() => setShowDepositModal(false)}>Cancel</button>
-          <button className="primary-btn" onClick={handleDeposit}>Deposit</button>
-        </div>
-      </div>
-    </div>
-  );
-
+  // Phase 6 — single ctx bag passed to each tab. Each tab destructures only
+  // what it actually uses; the parent stays the source of truth.
+  const tabCtx = {
+    // DashboardTab
+    balance, refreshWalletBalance, solPrice,
+    publicKey, maskWalletAddress,
+    missions, activeMissions, completedMissions,
+    setShowCreateMissionModal,
+    activeContracts, updateContractProgress,
+    openRatingModal, setDisputeFor,
+    fetchApplicants,
+    // MissionsTab + HistoryTab use subsets of the above (missions, completedMissions)
+  };
 
   return (
     <>
@@ -1667,6 +1418,10 @@ function EnterpriseDashboard() {
             >
               <span className="nav-icon">📜</span>
               <span>History</span>
+            </div>
+            <div className={`nav-item ${activeTab === 'find' ? 'active' : ''}`} onClick={() => setActiveTab('find')}>
+              <span className="nav-icon">🔎</span>
+              <span>Find Operators</span>
             </div>
             <div className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
               <span className="nav-icon">💬</span>
@@ -1703,6 +1458,7 @@ function EnterpriseDashboard() {
               {activeTab === 'dashboard' && 'Enterprise Dashboard'}
               {activeTab === 'missions' && 'All Missions'}
               {activeTab === 'history' && 'Mission History'}
+              {activeTab === 'find' && '🔎 Find Operators'}
               {activeTab === 'chat' && 'Messages'}
               {activeTab === 'settings' && 'Settings'}
             </h1>
@@ -1711,9 +1467,10 @@ function EnterpriseDashboard() {
             </div>
           </div>
 
-          {activeTab === 'dashboard' && <DashboardTab />}
-          {activeTab === 'missions' && <MissionsTab />}
-          {activeTab === 'history' && <HistoryTab />}
+          {activeTab === 'dashboard' && <DashboardTab ctx={tabCtx} />}
+          {activeTab === 'missions'  && <MissionsTab  ctx={tabCtx} />}
+          {activeTab === 'history'   && <HistoryTab   ctx={tabCtx} />}
+          {activeTab === 'find'      && <FindOperatorsTab />}
           {activeTab === 'chat' && (
             <div style={{ display: 'flex', height: 'calc(100vh - 140px)', background: '#111', border: '1px solid #222', borderRadius: 20, overflow: 'hidden' }}>
               {/* Left: contract/operator list */}
@@ -1728,7 +1485,7 @@ function EnterpriseDashboard() {
                       No active contracts yet.<br />Approve an operator to start chatting.
                     </div>
                   ) : chatContracts.map(c => (
-                    <div key={c.id}
+                    <div key={`${c.kind}-${c.id}`}
                       onClick={() => loadChatMessages(c)}
                       style={{
                         padding: '14px 18px', borderBottom: '1px solid #1a1a1a', cursor: 'pointer',
@@ -1738,8 +1495,20 @@ function EnterpriseDashboard() {
                       onMouseEnter={e => e.currentTarget.style.background = '#1a1a1a'}
                       onMouseLeave={e => { if (chatContact?.id !== c.id) e.currentTarget.style.background = 'transparent'; }}
                     >
-                      <div style={{ color: 'white', fontWeight: 600, fontSize: 14, marginBottom: 3 }}>{c.title || 'Contract'}</div>
-                      <div style={{ color: '#666', fontSize: 12 }}>Operator ID: {c.operator_id?.slice(0,8)}…</div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                        <div style={{ color: 'white', fontWeight: 600, fontSize: 14 }}>{c.title || 'Contract'}</div>
+                        {c.unread_count > 0 && (
+                          <span style={{
+                            background: '#9333ea', color: 'white',
+                            borderRadius: '50%', minWidth: 18, height: 18,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, fontWeight: 700, padding: '0 6px',
+                          }}>{c.unread_count}</span>
+                        )}
+                      </div>
+                      <div style={{ color: '#666', fontSize: 12 }}>
+                        {c.kind === 'conversation' ? '💬' : '📜'} {c.subtitle}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1760,7 +1529,7 @@ function EnterpriseDashboard() {
                         <div style={{ color: '#555', textAlign: 'center', marginTop: 40, fontSize: 14 }}>No messages yet. Say hello!</div>
                       )}
                       {chatMessages.map(msg => {
-                        const isMine = msg.sender_type === 'enterprise';
+                        const isMine = msg.sender_kind === 'mine';
                         return (
                           <div key={msg.id} style={{ display: 'flex', justifyContent: isMine ? 'flex-end' : 'flex-start' }}>
                             <div style={{
@@ -1770,7 +1539,7 @@ function EnterpriseDashboard() {
                               borderRadius: isMine ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
                               color: 'white'
                             }}>
-                              <div style={{ fontSize: 14, marginBottom: 4 }}>{msg.text}</div>
+                              <div style={{ fontSize: 14, marginBottom: 4 }}>{msg.body}</div>
                               <div style={{ fontSize: 11, opacity: 0.6 }}>
                                 {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                               </div>
@@ -2279,6 +2048,23 @@ function EnterpriseDashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Dispute modal — Phase 4B */}
+      {disputeFor && (
+        <DisputeModal
+          contractId={disputeFor}
+          onClose={() => setDisputeFor(null)}
+          onSubmitted={() => {
+            // Refresh contracts so any status change is visible.
+            if (sessionUser?.id) {
+              fetch(`${API_BASE}/api/contracts?enterprise_id=${sessionUser.id}&status=active`)
+                .then(r => r.json())
+                .then(data => Array.isArray(data) && setActiveContracts(data))
+                .catch(() => {});
+            }
+          }}
+        />
       )}
     </>
   );

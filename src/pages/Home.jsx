@@ -6,11 +6,12 @@ import { useNavigate } from 'react-router-dom';
 import { useSession } from '../Context/sessionContext';
 import logo from "../assets/AdobSOL.png";
 import constructionImg from "../assets/Construction.png";
+import { API_BASE, signInWithWallet } from '../lib/api';
 
 function Home() {
   const navigate = useNavigate();
   const { user, loading: sessionLoading, login, clearSession } = useSession();
-  const { publicKey, connected, disconnect } = useWallet();
+  const { publicKey, connected, disconnect, signMessage } = useWallet();
   const { setVisible } = useWalletModal();
   const [walletNotFound, setWalletNotFound] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
@@ -83,28 +84,38 @@ function Home() {
 
     const checkWallet = async () => {
       try {
+        // First a cheap public lookup — does this wallet have an account?
         const response = await fetch(
-          `http://localhost:3001/api/auth/wallet-check?wallet=${publicKey.toBase58()}`
+          `${API_BASE}/api/auth/wallet-check?wallet=${publicKey.toBase58()}`
         );
         const data = await response.json();
 
-        if (data.exists && data.user) {
-          // login() writes to localStorage + sets user in context
-          // Once user is set, the effect in STEP 1 fires and navigates
-          login(data.user, true);
+        if (!data.exists) {
+          setWalletNotFound(true);
           return;
         }
 
-        setWalletNotFound(true);
+        // Account exists — run the full challenge / sign / login flow so the
+        // server actually verifies wallet ownership and issues a JWT.
+        if (!signMessage) {
+          console.warn('Wallet does not support signMessage — cannot auto-login');
+          setWalletNotFound(false);
+          return;
+        }
+        const result = await signInWithWallet(publicKey.toBase58(), signMessage);
+        login(result.user, result.token);
+        // Step-1 effect picks up the user state and routes to dashboard.
       } catch (error) {
-        console.error('Wallet check error:', error);
+        console.error('Wallet auto-login error:', error);
+        // Reset so the user can retry by reconnecting.
+        hasChecked.current = false;
       } finally {
         setIsChecking(false);
       }
     };
 
     checkWallet();
-  }, [connected, publicKey, sessionLoading, user, login, navigate]);
+  }, [connected, publicKey, sessionLoading, user, login, navigate, signMessage]);
 
   // ── STEP 3: Reset on wallet disconnect ────────────────────────────────────
   useEffect(() => {

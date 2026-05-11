@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSession } from '../Context/sessionContext';
+import ReputationCard from '../components/ReputationCard';
+import ExperienceTimeline from '../components/ExperienceTimeline';
+import ContactOperatorButton from '../components/ContactOperatorButton';
+import BioEditor from '../components/BioEditor';
+import { API_BASE } from '../lib/api';
 
 export default function OperatorProfile() {
   const { username } = useParams();
@@ -17,7 +22,7 @@ export default function OperatorProfile() {
       return;
     }
 
-    fetch(`http://localhost:3001/api/profiles/operator/username/${username}`)
+    fetch(`${API_BASE}/api/profiles/operator/username/${username}`)
       .then(r => r.json())
       .then(data => {
         if (data.error) {
@@ -184,32 +189,32 @@ export default function OperatorProfile() {
                 )}
               </div>
 
-              <button
-                onClick={() => {
-                  const subject = `Contact with ${operator.full_name}`;
-                  const body = `Hi ${operator.full_name},\n\nI'm interested in your services. Please get back to me at your earliest convenience.\n\nThanks`;
-                  window.location.href = `mailto:${operator.email || 'support@solskies.com'}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-                }}
-                style={{
-                  padding: '10px 20px',
-                  background: '#9333ea',
-                  border: 'none',
-                  color: '#fff',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontWeight: '600',
-                  fontSize: '14px',
-                  transition: 'all 0.2s ease'
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.background = '#a855f7';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.background = '#9333ea';
-                }}
-              >
-                ✉️ Contact
-              </button>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {/* In-app chat — only renders when the viewer is an enterprise */}
+                <ContactOperatorButton
+                  operatorId={operator.id}
+                  operatorName={operator.full_name}
+                />
+                <button
+                  onClick={() => {
+                    const subject = `Contact with ${operator.full_name}`;
+                    const body = `Hi ${operator.full_name},\n\nI'm interested in your services. Please get back to me at your earliest convenience.\n\nThanks`;
+                    window.location.href = `mailto:${operator.email || 'support@solskies.com'}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                  }}
+                  style={{
+                    padding: '10px 20px',
+                    background: 'transparent',
+                    border: '1px solid #333',
+                    color: '#aaa',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    fontWeight: '600',
+                    fontSize: '14px',
+                  }}
+                >
+                  ✉️ Email
+                </button>
+              </div>
             </div>
 
             {/* Rating */}
@@ -228,17 +233,45 @@ export default function OperatorProfile() {
           </div>
 
           {/* Bio */}
-          {operator.bio && (
+          {operator.bio ? (
             <div style={{
               padding: '16px',
               background: '#1a1a1a',
               borderRadius: '8px',
               color: '#aaa',
-              borderLeft: '3px solid #9333ea'
+              borderLeft: '3px solid #9333ea',
+              marginBottom: 10,
             }}>
               {operator.bio}
             </div>
+          ) : (user?.role === 'operator' && user?.id === operator.id) ? (
+            <div style={{ color: '#666', fontSize: 13, marginBottom: 10, fontStyle: 'italic' }}>
+              No bio yet — enterprises judge profiles partly on this. Add a short one ↓
+            </div>
+          ) : null}
+
+          {/* Owner-only inline bio editor */}
+          {user?.role === 'operator' && user?.id === operator.id && (
+            <BioEditor
+              kind="operator"
+              ownerId={operator.id}
+              initialBio={operator.bio}
+              onSaved={(updated) => setOperator(prev => ({ ...prev, bio: updated.bio }))}
+            />
           )}
+        </div>
+
+        {/* Reputation breakdown — Phase 4 */}
+        <div style={{ marginBottom: '40px' }}>
+          <ReputationCard operatorId={operator.id} />
+        </div>
+
+        {/* Work history — "LinkedIn for drones" timeline */}
+        <div style={{ marginBottom: '40px' }}>
+          <ExperienceTimeline
+            operatorId={operator.id}
+            canEdit={user?.role === 'operator' && user?.id === operator.id}
+          />
         </div>
 
         {/* Stats */}

@@ -1,95 +1,113 @@
 // src/Context/sessionContext.jsx
+//
+// Session state for SolSkies. Backed by:
+//   - JWT (in localStorage via src/lib/api.js — also in module-local state for fetch)
+//   - cached user object (localStorage `solskies_session`)
+//
+// On mount:
+//   1. If a token is present, call GET /api/auth/me to validate it.
+//      - 200 → set user, refresh cache.
+//      - 401 → clear everything.
+//   2. If no token, render anonymous (loading: false, user: null).
+//
+// login() expects the {user, token} response from the server. The token is
+// persisted via setAuthToken(); user goes into both state + localStorage cache
+// (the cache is purely a UX optimization to avoid the /me round-trip flicker).
+
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { apiFetch, setAuthToken, getAuthToken, setUnauthorizedHandler } from '../lib/api';
 
 const SessionContext = createContext();
+const USER_KEY = 'solskies_session';
 
 export function SessionProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Read session once on mount — localStorage is synchronous so this is instant
+  // ── Mount: validate cached token ──────────────────────────────────────────
   useEffect(() => {
-    const raw = localStorage.getItem('solskies_session');
-    if (!raw) { setLoading(false); return; }
-    try {
-      const s = JSON.parse(raw);
-      if (Date.now() < s.expiresAt) {
-        setUser(s.user);
-      } else {
-        localStorage.removeItem('solskies_session');
-        localStorage.removeItem('solskies_user');
+    let cancelled = false;
+
+    const init = async () => {
+      const token = getAuthToken();
+
+      // Optimistic restore from cache so the UI doesn't flash unauth'd.
+      try {
+        const raw = localStorage.getItem(USER_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          if (cached?.user) setUser(cached.user);
+        }
+      } catch { /* ignore */ }
+
+      if (!token) {
+        if (!cancelled) setLoading(false);
+        return;
       }
-    } catch {
-      localStorage.removeItem('solskies_session');
-      localStorage.removeItem('solskies_user');
-    }
-    setLoading(false);
+
+      try {
+        const { user: fresh } = await apiFetch('/api/auth/me');
+        if (cancelled) return;
+        setUser(fresh);
+        localStorage.setItem(USER_KEY, JSON.stringify({ user: fresh }));
+      } catch {
+        // Token expired/invalid — apiFetch already cleared it.
+        if (cancelled) return;
+        setUser(null);
+        localStorage.removeItem(USER_KEY);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    init();
+    return () => { cancelled = true; };
   }, []);
 
-  const login = useCallback((userData, rememberMe = false) => {
-    const expiresAt = Date.now() + (rememberMe ? 30 : 1) * 24 * 60 * 60 * 1000;
-    const session = { user: userData, role: userData.role, loggedInAt: Date.now(), expiresAt };
-    localStorage.setItem('solskies_session', JSON.stringify(session));
-    localStorage.setItem('solskies_user', JSON.stringify(userData));
+  // Register a 401-handler so any apiFetch caller that hits an expired token
+  // immediately drops the user from React state without waiting for re-mount.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setUser(null);
+      try { localStorage.removeItem(USER_KEY); } catch {}
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // ── login: called by Login.jsx / SignUp.jsx with the server's response ────
+  const login = useCallback((userData, token) => {
+    setAuthToken(token);
     setUser(userData);
+    try {
+      localStorage.setItem(USER_KEY, JSON.stringify({ user: userData }));
+    } catch { /* ignore */ }
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // logout: hard-redirect to /?loggedOut=1 — this is the ONLY correct approach.
-  //
-  // WHY window.location.replace() and NOT navigate():
-  //   React Router navigate() is async. After logout(), isAuthenticated becomes
-  //   false immediately. Every component with an auth-guard useEffect fires
-  //   navigate('/') simultaneously, racing each other → freeze.
-  //   window.location.replace() fully unloads React so no effect can compete.
-  //
-  // WHY /?loggedOut=1 and NOT /:
-  //   Phantom/Solflare stay connected in the browser extension after logout.
-  //   Without the flag, Home.jsx sees connected=true + publicKey → auto-checks
-  //   wallet → finds user → logs back in → infinite loop.
-  //   The flag tells Home to skip the wallet check for this exact page load.
-  //
-  // WHY window.solana.disconnect() is attempted:
-  //   Some wallet adapters don't expose disconnect via useWallet at the context
-  //   level. window.solana is the universal fallback.
+  // logout: hard-redirect to /?loggedOut=1 — see lengthy comment below.
+  // The flag tells Home to skip the wallet auto-login this paint.
   // ─────────────────────────────────────────────────────────────────────────
   const logout = useCallback(async () => {
-    // 1. Clear all session storage first
-    localStorage.removeItem('solskies_session');
-    localStorage.removeItem('solskies_user');
-    localStorage.removeItem('justLoggedOut'); // clean up old flag if present
-
-    // 2. Attempt wallet disconnect (best-effort — failure is non-fatal)
+    setAuthToken(null);
     try {
-      if (window.solana?.disconnect) {
-        await window.solana.disconnect();
-      }
-    } catch (_) {
-      // non-fatal — wallet may already be disconnected
-    }
+      localStorage.removeItem(USER_KEY);
+    } catch {}
 
-    // 3. Clear React state (will trigger re-renders but hard-redirect follows immediately)
+    try {
+      if (window.solana?.disconnect) await window.solana.disconnect();
+    } catch { /* non-fatal */ }
+
     setUser(null);
-
-    // 4. Hard-redirect with loggedOut flag — fully unmounts React tree,
-    //    eliminating all race conditions between competing navigations.
     window.location.replace('/?loggedOut=1');
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // clearSession: clears localStorage and resets user WITHOUT redirecting
-  //
-  // Used when switching wallets — the user is still on the page, but we need
-  // to clear the stale session data without the hard redirect that logout uses.
-  // ─────────────────────────────────────────────────────────────────────────
+  // clearSession: like logout but no redirect. Used on wallet-switch.
   const clearSession = useCallback(() => {
-    localStorage.removeItem('solskies_session');
-    localStorage.removeItem('solskies_user');
+    setAuthToken(null);
+    try { localStorage.removeItem(USER_KEY); } catch {}
     setUser(null);
   }, []);
 
-  // isAuthenticated is DERIVED from user — never a separate boolean state
-  // that can drift out of sync with the user object.
   const isAuthenticated = !!user;
 
   return (

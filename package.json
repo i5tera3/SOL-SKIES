@@ -6,9 +6,9 @@
     "dev": "vite",
     "server": "node server/index.mjs",
     "dev:all": "concurrently \"npm run server\" \"npm run dev\"",
-    "build": "vite build",
+    "build": "npx --no-install vite build",
     "start": "node server/index.mjs",
-    "deploy:build": "vite build"
+    "deploy:build": "npx --no-install vite build"
   },
   "dependencies": {
     "@solana/wallet-adapter-base": "^0.9.23",
